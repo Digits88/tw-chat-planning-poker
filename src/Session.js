@@ -1,4 +1,5 @@
 import { EventEmitter } from "events";
+import qs from "qs";
 import winston from "winston";
 import moment from "moment";
 import Promise, { CancellationError } from "bluebird";
@@ -9,11 +10,13 @@ import Round from "./Round";
 
 const ICON_ANNOUNCEMENT = ":microphone:";
 const ICON_WAITING = ":hourglass_flowing_sand:";
+const ICON_ALERT = ":bangbang:";
 const ICON_COMPLETE = ":white_check_mark:";
 const ICON_CELEBRATE = ":shipit:";
 const ICON_QUESTION = ":question:";
 const ICON_ERROR = ":x:";
 const ICON_HELP = ":sos:";
+const ICON_SKIP = ":dash:";
 const ICON_MODERATOR = ":wolf:";
 
 export default class Session extends EventEmitter {
@@ -21,31 +24,41 @@ export default class Session extends EventEmitter {
     rounds;
     moderator;
 
-    constructor(name, admin, room, moderator) {
+    constructor(admin, room, moderator) {
         super();
-        
-        this.name = name;
+
         this.admin = admin;
         this.room = room;
         this.moderator = moderator;
         this.rounds = [];
+        this.completedRounds = [];
+        this.skippedRounds = [];
 
-        winston.info(`create new session: ${name}`, { room: room.id, moderator: moderator.id });
+        winston.info("create new session", { room: room.id, moderator: moderator.id });
 
-        this.mentionCommands = new RegExp(`^@${room.api.user.handle} (help|start|skip|pass|plan|estimate|status|add)(.*)`);
+        this.mentionCommands = new RegExp(`^@${room.api.user.handle} (help|start|skip|pass|vote|plan|estimate|status|add)(.*)`);
         this.directCommands = new RegExp(`^@${room.api.user.handle} (help|stop)(.*)`);
 
         // Listen for commands in the room
         this.room.on("message:mention", this.handleMention.bind(this));
+        this.room.on("person:added", this.handleAddedPerson.bind(this));
+        this.room.on("person:removed", this.handleRemovedPerson.bind(this));
 
         // Listen for commands from the user
         this.room.people.forEach(person => person.on("message:received", this.handleDirectMessage.bind(person, this)));
-        // TODO: Handle newly added people to the room
+    }
+
+    async handleAddedPerson(person) {
+        await this.broadcast(`${ICON_ALERT} ${person.firstName} has joined the planning. Hi @${person.handle}!`);
+        await person.sendMessage(this.formatDirectWelcomeMessage(person));
+    }
+
+    async handleRemovedPerson(person) {
+        await this.broadcast(`${ICON_ALERT} ${person.firstName} has left the room.`);
+        await person.sendMessage(`${person.firstName}, you have left or have been removed from planning${this.name ? " " + this.name : ""}, I won't annoy you anymore.`);
     }
 
     async init() {
-        // Send the welcome message to the room and participating users.
-        await this.broadcast(`:wave: Welcome to Sprint Planning Poker. Use this room for discussion on tasks.`);
         await this.help();
 
         await this.broadcast(
@@ -55,11 +68,7 @@ export default class Session extends EventEmitter {
 
         await Promise.delay(2000);
 
-        await this.broadcastDirect(person =>
-            `Hi @${person.handle}, you've been included in Sprint Planning Poker with ` + 
-            `${this.participants.map(person => person.firstName).join(", ")}. I'll be asking ` +
-            `you for estimates soon when the planning starts.`
-        );
+        await this.broadcastDirect(person => this.formatDirectWelcomeMessage(person));
     }
 
     handleMention(message) {
@@ -86,6 +95,14 @@ export default class Session extends EventEmitter {
                         }
 
                         return this.plan(RegExp.$1, parseInt(RegExp.$2));
+                    break;
+
+                    case "vote":
+                        if(!args) {
+                            throw new Error("Please provide an estimate.");
+                        }
+
+                        return this.vote(message.author, parseEstimate(args));
                     break;
 
                     case "estimate":
@@ -136,11 +153,10 @@ export default class Session extends EventEmitter {
             ].join(""));
         }
 
-        this.currentRoundIndex = 0;
         this.planning = true;
         this.startTime = moment();
 
-        while(this.currentRound) {
+        while(this.currentRound = this.rounds.shift()) {
             winston.info("moving to the next round");
             let result;
 
@@ -149,6 +165,8 @@ export default class Session extends EventEmitter {
             } catch(err) {
                 // If the moderator manually sets the esimate, we cancel the currently executing round
                 if(err instanceof CancellationError) {
+                    await this.broadcastDirect(`:no_entry: No need to estimate the last task, we're skipping it for now.`);
+
                     continue;
                 } else throw err;
             } 
@@ -167,18 +185,26 @@ export default class Session extends EventEmitter {
             await this.nextRound();
         }
 
+        this.currentRound = null;
         this.endTime = moment();
+        this.duration = moment.duration(this.endTime.diff(this.startTime));
         this.planning = false;
+        this.completed = true;
 
-        await this.broadcast(`${ICON_CELEBRATE} Sprint planning complete.`);
+        await this.broadcastAll(`${ICON_CELEBRATE} Sprint planning complete. It only took ${this.duration.humanize()}.`);
+        await this.broadcast(this.completedRounds.map((round, i) => `${i}. ${round.formatTaskLink()} - **${round.value}**`).join("\n"));
 
         this.emit("complete");
     }
 
     async plan(installation, tasklist) {
+        if(this.rounds.length || this.planning) {
+            throw new Error("Cannot plan another tasklist when we're already planning!");
+        }
+
         // Get the tasks. Once we get the whole API together in one module, this will be awesome
-        tasklist = (await this.admin.api.request(`/tasklists/${tasklist}.json`))["todo-list"];
-        const tasks = (await this.admin.api.request(`/tasklists/${parseInt(tasklist.id)}/tasks.json`))["todo-items"];
+        this.tasklist = (await this.admin.api.request(`/tasklists/${tasklist}.json`))["todo-list"];
+        const tasks = (await this.admin.api.request(`/tasklists/${parseInt(tasklist)}/tasks.json`))["todo-items"];
 
         if(!tasks || !tasks.length) {
             throw new Error("Your tasklist doesn't seem to have any tasks!");
@@ -193,27 +219,82 @@ export default class Session extends EventEmitter {
         }));
 
         await this.broadcast(
-            `${ICON_ANNOUNCEMENT} Okay, we're going to plan the **${tasklist.name}** tasklist. ` + 
+            `${ICON_ANNOUNCEMENT} Okay, we're going to plan the **${this.tasklist.name}** tasklist. ` + 
             `${ICON_WAITING} There are ${tasks.length} tasks to plan. To start, @${this.moderator.handle} ping me to start (\`@${this.admin.handle} start\`).`
         );
+
+        this.name = this.tasklist.name;
+        await this.room.updateTitle(`Sprint planning poker: ${this.name}`);
     }
 
     async estimate(estimate) {
-        if(!this.currentRound) {
+        if(!this.planning) {
             throw new Error("There is no current task to set the estimate for, sorry!");
         }
 
-        this.currentRound.end();
+        this.currentRound.finalize(estimate);
 
-        const task = this.currentRound.task;
+        const hours = Math.floor(estimate);
+        const minutes = Math.floor((estimate - hours) * 60);
 
-        await this.broadcast(`${ICON_COMPLETE} Updating task #${task.id} with an estimate of ${estimate} hr(s).`);
+        await this.admin.api.request("/?action=invoke.tasks.OnSetTaskEstimates()", { // I know about `query`, the API complains >.>
+            method: "POST",
+            raw: true,
+            headers: {
+                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                "twProjectsVer": "2.0"
+            },
+            body: qs.stringify({
+                projectId: this.tasklist.projectId,
+                taskId: this.currentRound.task.id,
+                taskEstimateHours: hours,
+                taskEstimateMins: minutes
+            })
+        });
+
+        await this.broadcast(`${ICON_COMPLETE} Updating task #${this.currentRound.task.title} with an estimate of ${estimate} hr(s).`);
+    }
+
+    async vote(person, estimate) {
+        if(!this.planning) {
+            throw new Error("There is not task to vote on!");
+        }
+
+        const prompt = this.currentRound.prompts.find(prompt => prompt.person === person);
+
+        if(prompt.isPending()) {
+            prompt.finalize(estimate);
+        } else {
+            throw new Error("Already voted!");
+        }
     }
 
     async nextRound() {
-        const i = this.currentRoundIndex++;
-        const len = this.rounds.length;
-        await this.broadcast(`${ICON_ANNOUNCEMENT} Moving to next task (#${i + 1} of ${len}, ${len - i} to go).`);
+        this.completedRounds.push(this.currentRound);
+        const completed = this.completedRounds.length;
+        const pending = this.rounds.length;
+        const total = completed + pending;
+        await this.broadcast(`${ICON_ANNOUNCEMENT} Moving to next task (#${completed} of ${total}, ${pending} to go).`);
+    }
+
+    async skip() {
+        if(!this.planning) {
+            throw new Error(`There is no task to skip!`);
+        }
+
+        this.currentRound.cancelAllEstimates();
+        this.skippedRounds.push(this.currentRound);
+        await this.broadcastAll(`${ICON_SKIP} Skipping task ${this.currentRound.formatTaskLink()}. Removing it from the planning.`);
+    }
+
+    async pass() {
+        if(!this.planning) {
+            throw new Error(`There is no task to pass!`);
+        }
+
+        this.currentRound.cancelAllEstimates();
+        this.rounds.push(this.currentRound);
+        await this.broadcastAll(`${ICON_SKIP} Hold up, we'll complete this task later. Pushing task to end of the queue.`);
     }
 
     help() {
@@ -221,13 +302,13 @@ export default class Session extends EventEmitter {
         return this.broadcast(stripIndent`
             ${ICON_HELP} **Sprint Poker Planning Help**
             * *"${handle} plan <tasklist url>"* to set the tasklist to plan.
-            * *"${handle} add <handle>"* to add a user to the planning.
             * *"${handle} start"* to begin the planning.
             * *"${handle} skip"* to skip planning a task.
             * *"${handle} pass"* to push the task to the end of the planning queue.
             * *"${handle} estimate <hours>"* to manually set the estimate (only the moderator, @${this.moderator.handle}, can do this).
             * *"${handle} vote <hours>"* to publically vote your estimate during a round.
             * *"${handle} status"* to get who is still current estimating.
+            * *To add or remove user's from the sprint planning, use the people tab.*
         `);
     }
 
@@ -237,7 +318,7 @@ export default class Session extends EventEmitter {
             `${ICON_COMPLETE} ${this.completedRounds.length} of ${this.rounds.length} tasks estimated.`
         ];
 
-        if(this.currentRound) {
+        if(this.planning) {
             const estimating = this.currentRound.getEstimatingUsers();
 
             output.push(`${ICON_ANNOUNCEMENT} Current task: [${this.currentRound.task.title}](${this.currentRound.task.link})`);
@@ -246,6 +327,11 @@ export default class Session extends EventEmitter {
                 output.push(`${ICON_WAITING} ${estimating.map(p => "@" + p.handle).join(", ")} are still estimating.`);
             } 
         }
+
+        if(this.completed) {
+            output.push(`${ICON_CELEBRATE} Sprint planning complete.`);
+        }
+
 
         return this.room.sendMessage(output.join("\n"));
     }
@@ -287,12 +373,12 @@ export default class Session extends EventEmitter {
         return without(this.room.people, this.admin);
     }
 
-    get currentRound() {
-        return this.planning ? this.rounds[this.currentRoundIndex] : null;
-    }
-
-    get completedRounds() {
-        return this.rounds.filter(round => round.complete);
+    formatDirectWelcomeMessage(person) {
+        return (
+            `Hi @${person.handle}, you've been included in Sprint Planning Poker with ` + 
+            `${this.participants.map(person => person.firstName).join(", ")}. I'll be asking ` +
+            `you for estimates soon when the planning starts.`
+        );
     }
 }
 

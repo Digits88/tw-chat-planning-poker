@@ -1,46 +1,51 @@
+import Promise from "bluebird";
 import winston from "winston";
-import { stripIndent } from "common-tags";
 import TeamworkChat from "@teamwork/tw-chat";
+import { pull } from "lodash";
 import Session from "./Session";
 
 winston.add(winston.transports.File, { filename: "poker.log" });
 
-export default TeamworkChat.fromAuth("http://1486461376533.teamwork.com", "dJOs9ljikVpGIQdJux6QugXr49Zq6V-127607").then(async bot => {
-    // const activator = `@${bot.handle} poker`;
+export default TeamworkChat.fromAuth("http://1486461376533.teamwork.com", "dJOs9ljikVpGIQdJux6QugXr49Zq6V-127607").then(bot => {
+    const activator = new RegExp(`^@${bot.handle} poker(.+)`);
+    const sessions = [];
 
-    // winston.info(`starting poker bot with handle @${bot.handle}`);
-    // return bot.on("message:mention", async (room, message) => {
-    //     winston.info(`mention in room ${room.id} by @${message.author.handle}: ${message.content}`);
+    winston.info(`starting poker bot with handle @${bot.handle}`);
+    return bot.on("message:mention", (room, message) => {
+        winston.info(`mention in room ${room.id} by @${message.author.handle}: ${message.content}`);
 
-    //     if(message.content.startsWith(activator)) {
-    //         const moderator = message.author;
+        Promise.try(async () => {
+            if(message.content.match(activator)) {
+                const moderator = message.author;
 
-    //         winston.info(`new poker game requested`);
+                winston.info(`new poker game requested`);
 
-    //         const name = `Session #${Math.random() * 1000}`;
+                const handles = RegExp.$1.split(" ").map(handle => handle.trim().replace("@", "")).filter(handle => handle);
 
-    //         // To start a new poker game, create a room with the moderator and the bot
-    //         const sessionRoom = await bot.createRoomWithHandles([bot.handle, message.author.handle, "michael"], stripIndent`
-    //             Hi @${message.author.handle}, you've started a new game of sprint planning poker. Please add 
-    //             the users you wish to participate in the planning to this room then ping me to
-    //             start ("@${bot.handle} start").
-    //         `);
+                if(!handles.length || handles.length < 1) {
+                    throw new Error(`Sorry @${moderator.handle}, please supply at least one other to plan the sprint.`);
+                }
 
-    //         winston.info(`new room created for poker game ${sessionRoom.id}`);
+                // Ensure all the user's exist.
+                await Promise.all(handles.map(handle => bot.getPersonByHandle(handle)));
 
-    //         await sessionRoom.updateTitle("Planning poker room: " + name);
+                // To start a new poker game, create a room with the moderator and the bot
+                const sessionRoom = await bot.createRoomWithHandles(
+                    [bot.handle, moderator.handle, ...handles], 
+                    ":wave: Welcome to Sprint Planning Poker. Use this room for discussion on tasks."
+                );
 
-    //         const session = new Session(name, sessionRoom, moderator, [{
-    //             id: 1,
-    //             title: "Hello world!",
-    //             link: "http://google.com"
-    //         }]);
+                winston.info(`new room created for poker game ${sessionRoom.id}`);
 
-    //         await session.execute();
-    //     }
-    // });
-    
-    const session = new Session("Poker session", bot, await bot.getRoom(3583), await bot.getPersonByHandle("adrian"));
+                const session = new Session(bot, sessionRoom, moderator);
 
-    return session.init();
+                sessions.push(session);
+                session.on("complete", () => pull(sessions, session));
+
+                await session.init();
+            }
+        }).catch(error => {
+            room.sendMessage(error.message);
+        });
+    });
 });

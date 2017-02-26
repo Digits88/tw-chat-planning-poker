@@ -50,8 +50,6 @@ export default class Round {
                     // Notify the other when someone has voted
                     await prompt.person.sendMessage(`:white_check_mark: Thank you. You estimate of ${result} hr(s) has be submitted.`);
                     await this.session.broadcast(`:heavy_check_mark: ${prompt.person.firstName} has voted.`);
-                }).catch(CancellationError, error => {
-                    return prompt.person.sendMessage(":no_entry: The moderator has manually selected an estimate, ignore the last task.");
                 });
             })).then(resolve, reject);
         });
@@ -59,6 +57,7 @@ export default class Round {
 
     cancelAllEstimates() {
         this.reject(new CancellationError("Estimation cancelled."));
+        this.reject = null;
         this.prompts.forEach(prompt => prompt.cancel());
         this.prompts = [];
     }
@@ -68,11 +67,20 @@ export default class Round {
     }
 
     formatTask() {
-        return `---\n:arrow_right: Task #${this.task.id}: [${this.task.title}](${this.task.link})`;
+        return `---\n:arrow_right: Task #${this.task.id}: ${this.formatTaskLink()}`;
+    }
+
+    formatTaskLink() {
+        return `[${this.task.title}](${this.task.link})`;
     }
 
     end() {
         winston.info("round over");
         this.endTime = moment();
+    }
+
+    finalize(value) {
+        this.value = value;
+        this.end();
     }
 }
