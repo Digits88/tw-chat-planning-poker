@@ -6,7 +6,8 @@ import Session from "./Session";
 
 winston.add(winston.transports.File, { filename: "poker.log" });
 
-export default TeamworkChat.fromAuth("http://1486461376533.teamwork.com", "dJOs9ljikVpGIQdJux6QugXr49Zq6V-127607").then(bot => {
+// export default TeamworkChat.fromAuth("http://1486461376533.teamwork.com", "dJOs9ljikVpGIQdJux6QugXr49Zq6V-127607").then(bot => {
+export default TeamworkChat.fromKey("http://digitalcrew.teamwork.com", "dog51june").then(bot => {
     const activator = new RegExp(`^@${bot.handle} poker(.+)`);
     const sessions = [];
 
