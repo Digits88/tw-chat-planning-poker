@@ -6,8 +6,7 @@ import Session from "./Session";
 
 winston.add(winston.transports.File, { filename: "poker.log" });
 
-// export default TeamworkChat.fromAuth("http://1486461376533.teamwork.com", "dJOs9ljikVpGIQdJux6QugXr49Zq6V-127607").then(bot => {
-export default TeamworkChat.fromKey("http://digitalcrew.teamwork.com", "dog51june").then(bot => {
+export default TeamworkChat.fromKey("http://<installation>", "<api key>").then(bot => {
     const activator = new RegExp(`^@${bot.handle} poker(.+)`);
     const sessions = [];
 
@@ -30,6 +29,9 @@ export default TeamworkChat.fromKey("http://digitalcrew.teamwork.com", "dog51jun
                 // Ensure all the user's exist.
                 await Promise.all(handles.map(handle => bot.getPersonByHandle(handle)));
 
+                // Reply saying that's all good
+                await message.room.sendMessage(`No problem. Creating a room with you and @${handles.join(", @")}`);
+
                 // To start a new poker game, create a room with the moderator and the bot
                 const sessionRoom = await bot.createRoomWithHandles(
                     [bot.handle, moderator.handle, ...handles], 
@@ -37,12 +39,13 @@ export default TeamworkChat.fromKey("http://digitalcrew.teamwork.com", "dog51jun
                 );
 
                 winston.info(`new room created for poker game ${sessionRoom.id}`);
-
                 const session = new Session(bot, sessionRoom, moderator);
 
+                // Do some very basic session tracking
                 sessions.push(session);
                 session.on("complete", () => pull(sessions, session));
 
+                // Start.
                 await session.init();
             }
         }).catch(error => {

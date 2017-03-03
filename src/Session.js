@@ -59,15 +59,14 @@ export default class Session extends EventEmitter {
     }
 
     async init() {
+        await this.room.updateTitle("Sprint Planning Poker");
         await this.help();
-
         await this.broadcast(
             `To begin, @${this.moderator.handle} (the moderator) must select a tasklist to plan. ` +
             `*Example:* \`@bot plan http://digitalcrew.teamwork.com/#tasklist/124424\``
         );
 
         await Promise.delay(2000);
-
         await this.broadcastDirect(person => this.formatDirectWelcomeMessage(person));
     }
 
@@ -107,7 +106,7 @@ export default class Session extends EventEmitter {
 
                     case "estimate":
                         if(message.author !== this.moderator) {
-                            throw new Error(`Sorry @${this.message.author}, only the moderator can set the estimate.`);
+                            throw new Error(`Sorry @${message.author}, only the moderator can set the estimate.`);
                         }
 
                         if(!this.currentRound) {
@@ -252,7 +251,7 @@ export default class Session extends EventEmitter {
             })
         });
 
-        await this.broadcast(`${ICON_COMPLETE} Updating task #${this.currentRound.task.title} with an estimate of ${estimate} hr(s).`);
+        await this.broadcast(`${ICON_COMPLETE} Updating task **${this.currentRound.task.title}** with an estimate of **${estimate}** hr(s).`);
     }
 
     async vote(person, estimate) {
@@ -376,7 +375,7 @@ export default class Session extends EventEmitter {
     formatDirectWelcomeMessage(person) {
         return (
             `Hi @${person.handle}, you've been included in Sprint Planning Poker with ` + 
-            `${this.participants.map(person => person.firstName).join(", ")}. I'll be asking ` +
+            `${without(this.participants, person).map(person => person.firstName).join(", ")}. I'll be asking ` +
             `you for estimates soon when the planning starts.`
         );
     }
